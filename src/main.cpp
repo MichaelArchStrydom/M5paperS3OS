@@ -8,6 +8,7 @@
 #include "SettingsApp.h"
 #include "PianoApp.h"
 #include "WidgetApp.h"
+#include "SudokuApp.h"
 // #include "TemplateApp.h"
 
 SPIClass sdSPI(FSPI);
@@ -18,6 +19,7 @@ SDExplorerApp sdExplorerApp(&appManager);
 WorkoutApp workoutApp(&appManager);
 PianoApp pianoApp(&appManager);
 WidgetApp widgetApp(&appManager);
+SudokuApp sudokuApp(&appManager);
 // TemplateApp templateApp(&appManager);
 
 
@@ -51,6 +53,7 @@ void setup() {
     appManager.registerApp("Workout", &workoutApp);
     appManager.registerApp("Piano", &pianoApp);
     appManager.registerApp("Widget", &widgetApp);
+    appManager.registerApp("Sudoku", &sudokuApp);
     //appManager.registerApp("Template", &templateApp);
     
     appManager.switchApp("Menu");
