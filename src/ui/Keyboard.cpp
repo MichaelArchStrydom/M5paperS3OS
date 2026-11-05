@@ -6,19 +6,22 @@ Keyboard::Keyboard(int x, int y, int w, int h)
     : _x(x), _y(y), _w(w), _h(h) {}
 
 // Updated show method
-void Keyboard::show(const std::string& placeholder, Callback onDone) {
+void Keyboard::show(const std::string& placeholder, Callback onDone, bool startInNumbers,
+                    const std::string& initialText) {
     _visible = true;
-    _text.clear();
+    _text = initialText;
     _placeholder = placeholder; // Save the passed string or the default "Type here..."
     _onDone = std::move(onDone);
     _shift = false;
     _capsLock = false;
-    _numbersMode = false;
+    _numbersMode = startInNumbers;
     _needsRedraw = true;
 
     M5.Display.setRotation(1);
+    M5.Display.startWrite(); // one EPD refresh for clear + keys
     M5.Display.clear(WHITE);
     draw();
+    M5.Display.endWrite();
 }
 
 void Keyboard::hide() {
@@ -167,10 +170,12 @@ void Keyboard::toggleShift() {
 }
 
 void Keyboard::toggleMode() {
+    M5.Display.startWrite();
     M5.Display.clear();
     _numbersMode = !_numbersMode;
     _needsRedraw = true;
     draw();
+    M5.Display.endWrite();
 }
 
 } // namespace ui

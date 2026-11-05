@@ -17,5 +17,10 @@ public:
   virtual bool handleBackPress() { return false; }
   virtual bool handleForwardPress() { return false; }
 
+  // Called before switching away and before the device powers down
+  // (idle or low battery). Persist anything that must survive here.
   virtual void exit() {};
+
+  // How long without touches before the device powers down.
+  virtual unsigned long idleTimeoutMs() { return 300000; }
 };

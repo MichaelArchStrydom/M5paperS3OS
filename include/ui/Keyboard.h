@@ -14,7 +14,8 @@ public:
     Keyboard(int x = 0, int y = 0, int w = 960, int h = 540);
 
     // Updated show method to accept an optional placeholder
-    void show(const std::string& placeholder = "Type here...", Callback onDone = nullptr);
+    void show(const std::string& placeholder = "Type here...", Callback onDone = nullptr,
+              bool startInNumbers = false, const std::string& initialText = "");
     void hide();
     bool isVisible() const { return _visible; }
     void draw();

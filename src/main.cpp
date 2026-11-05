@@ -33,19 +33,22 @@ void setup() {
     }
     // Rotation portrait flipped
     M5.Lcd.setRotation(2);
+    M5.Speaker.setVolume(128);
 
     Serial.begin(115200); 
-    //M5.Speaker.tone(20000, 1000);
     Serial.println("I'm ONNN!");
+
+    // Checks the battery first and powers straight back off if it is empty
+    appManager.setup();
+
+    // The radio is the biggest power draw; Settings > Network turns it on.
+    WiFi.mode(WIFI_OFF);
 
     sdSPI.begin(39, 40, 38);
     if (!SD.begin(47, sdSPI)) {
-        M5.Display.println("SD Card Mount Failed");
-        while(1);
+        // Keep running: apps that need the card show their own message.
+        Serial.println("SD Card Mount Failed");
     }
-
-    WiFi.mode(WIFI_AP_STA);
-    appManager.setup();
 
     appManager.registerApp("Menu", &menuApp);
     appManager.registerApp("SettingsApp", &settingsApp); 

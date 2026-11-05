@@ -1,0 +1,12 @@
+{
+  "networks": [
+    {
+      "ssid": "Home_WiFi",
+      "pass": "password123"
+    },
+    {
+      "ssid": "Phone_Hotspot",
+      "pass": "backup789"
+    }
+  ]
+}

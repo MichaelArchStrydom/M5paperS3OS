@@ -1,5 +1,6 @@
 #include "SudokuApp.h"
 #include "AppManager.h"
+#include "Storage.h"
 #include <ArduinoJson.h>
 #include <FS.h>
 #include <SD.h>
@@ -360,17 +361,9 @@ bool SudokuApp::loadPuzzles() {
   if (!ensureSudokuFile())
     return false;
 
-  File f = SD.open(SUDOKU_FILE, FILE_READ);
-  if (!f)
+  PsramJsonDocument doc(65536);
+  if (!storage::readJson(SUDOKU_FILE, doc))
     return false;
-
-  DynamicJsonDocument doc(65536);
-  DeserializationError err = deserializeJson(doc, f);
-  f.close();
-  if (err) {
-    Serial.printf("Sudoku: failed to parse puzzles.json: %s\n", err.c_str());
-    return false;
-  }
 
   _nextId = doc["nextId"] | 1;
   JsonArray arr = doc["puzzles"].as<JsonArray>();
@@ -396,7 +389,7 @@ bool SudokuApp::loadPuzzles() {
 }
 
 bool SudokuApp::savePuzzles() {
-  DynamicJsonDocument doc(65536);
+  PsramJsonDocument doc(65536);
   doc["nextId"] = _nextId;
   JsonArray arr = doc.createNestedArray("puzzles");
   for (const auto &rec : _puzzles) {
@@ -412,13 +405,7 @@ bool SudokuApp::savePuzzles() {
     o["createdAt"] = rec.createdAt;
   }
 
-  SD.remove(SUDOKU_FILE);
-  File f = SD.open(SUDOKU_FILE, FILE_WRITE);
-  if (!f)
-    return false;
-  serializeJson(doc, f);
-  f.close();
-  return true;
+  return storage::writeJsonAtomic(SUDOKU_FILE, doc);
 }
 
 int SudokuApp::cluesForDifficulty(Difficulty d) {

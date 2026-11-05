@@ -122,6 +122,8 @@ void SettingsApp::handleMainSettingsTouch(int x, int y){
                 M5.Rtc.getTime(&_time);
                 M5.Rtc.getDate(&_date);
             } else if (button.getLabel() == "Network") {
+                // WiFi is off by default to save battery
+                if (WiFi.getMode() == WIFI_OFF) WiFi.mode(WIFI_STA);
                 WiFi.scanNetworks(true);
                 _isScanning = true;
                 currentState = SettingsState::NETWORK;
@@ -140,6 +142,9 @@ void SettingsApp::drawDateTimeScreen(){
     M5.Display.drawCentreString("Year", 110, 130);
     M5.Display.drawCentreString("Month", 260, 130);
     M5.Display.drawCentreString("Date", 410, 130);
+    M5.Display.drawCentreString("Hour", 110, 380);
+    M5.Display.drawCentreString("Minute", 260, 380);
+    M5.Display.drawCentreString("Second", 410, 380);
     
     yearInc.draw(_date.year);
     monthInc.draw(_date.month);
@@ -150,15 +155,40 @@ void SettingsApp::drawDateTimeScreen(){
     saveButton.draw();
 }
 
+static int wrapValue(int value, int min, int max) {
+    if (value < min) return max;
+    if (value > max) return min;
+    return value;
+}
+
+static int daysInMonth(int year, int month) {
+    static const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12) return 31; // unset RTC can report month 0
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    return (month == 2 && leap) ? 29 : days[month - 1];
+}
+
 void SettingsApp::handleDateTimeTouch(int x, int y){
-    bool changed = false;
-    if(yearInc.isIncrementPressed(x, y)) { _date.year++; changed = true; }
-    else if (yearInc.isDecrementPressed(x, y)) { _date.year--; changed = true; }
-    else if(monthInc.isIncrementPressed(x, y)) { _date.month++; changed = true; }
-    else if (monthInc.isDecrementPressed(x, y)) { _date.month--; changed = true; }
-    else if(dateInc.isIncrementPressed(x, y)) { _date.date++; changed = true; }
-    else if (dateInc.isDecrementPressed(x, y)) { _date.date--; changed = true; }
-    
+    bool changed = true;
+    if(yearInc.isIncrementPressed(x, y)) _date.year = wrapValue(_date.year + 1, 2000, 2099);
+    else if (yearInc.isDecrementPressed(x, y)) _date.year = wrapValue(_date.year - 1, 2000, 2099);
+    else if(monthInc.isIncrementPressed(x, y)) _date.month = wrapValue(_date.month + 1, 1, 12);
+    else if (monthInc.isDecrementPressed(x, y)) _date.month = wrapValue(_date.month - 1, 1, 12);
+    else if(dateInc.isIncrementPressed(x, y)) _date.date = wrapValue(_date.date + 1, 1, daysInMonth(_date.year, _date.month));
+    else if (dateInc.isDecrementPressed(x, y)) _date.date = wrapValue(_date.date - 1, 1, daysInMonth(_date.year, _date.month));
+    else if(hourInc.isIncrementPressed(x, y)) _time.hours = wrapValue(_time.hours + 1, 0, 23);
+    else if (hourInc.isDecrementPressed(x, y)) _time.hours = wrapValue(_time.hours - 1, 0, 23);
+    else if(minuteInc.isIncrementPressed(x, y)) _time.minutes = wrapValue(_time.minutes + 1, 0, 59);
+    else if (minuteInc.isDecrementPressed(x, y)) _time.minutes = wrapValue(_time.minutes - 1, 0, 59);
+    else if(secondInc.isIncrementPressed(x, y)) _time.seconds = wrapValue(_time.seconds + 1, 0, 59);
+    else if (secondInc.isDecrementPressed(x, y)) _time.seconds = wrapValue(_time.seconds - 1, 0, 59);
+    else changed = false;
+
+    // Keep the day valid after a month/year change (31 Mar -> 30 Apr)
+    int maxDay = daysInMonth(_date.year, _date.month);
+    if (_date.date > maxDay) _date.date = maxDay;
+    if (_date.date < 1) _date.date = 1;
+
     if (saveButton.isPressed(x, y)) {
         m5::rtc_datetime_t dt; dt.date = _date; dt.time = _time;
         M5.Rtc.setDateTime(dt);

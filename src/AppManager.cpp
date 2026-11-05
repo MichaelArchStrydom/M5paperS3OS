@@ -1,42 +1,84 @@
 #include "AppManager.h"
 #include "BloomScreenSaver.h"
+#include <SD.h>
 #include <WiFi.h>
 
-// Static state tracking for system status
-static int lastBatteryLevel = -1;
-static std::string lastWiFiStatus = "";
-static wl_status_t lastRawWiFiStatus = WL_IDLE_STATUS;
-static bool touchHandled = false;
-static bool internalFooterUpdate =
-    false; // Local flag to replace the missing header variable
+namespace {
 
-// Battery and Power protection constants
-unsigned long lastBatteryCheck = 0;
-const int BATTERY_CHECK_INTERVAL = 10000;
-const int LOW_BATTERY_THRESHOLD = 10;
-const int WARNING_BATTERY_THRESHOLD = 20;
-unsigned long lastActivityTime = millis();
-const unsigned long IDLE_TIMEOUT = 300000; // 5 minutes
+// The PaperS3 measures the cell through a 1:2 divider on GPIO3. Readings sag
+// under load (WiFi, EPD refresh), so several consecutive low readings are
+// required before shutting down.
+constexpr int BATTERY_EMPTY_MV = 3300;
+constexpr int BATTERY_FULL_MV = 4150;
+constexpr int BATTERY_WARN_MV = 3600;
+constexpr int BATTERY_CRITICAL_MV = 3450;
+constexpr int CRITICAL_READINGS_BEFORE_SHUTDOWN = 3;
+constexpr unsigned long BATTERY_CHECK_INTERVAL_MS = 10000;
+constexpr unsigned long STATUS_CHECK_INTERVAL_MS = 1000;
+constexpr unsigned long LOOP_DELAY_MS = 10;
 
-void AppManager::setup() { M5.Display.clear(); }
+constexpr int FOOTER_Y = 910;
+
+// Not exposed by M5Unified 0.2.2; values match upstream M5Unified.
+constexpr int PAPERS3_CHG_STAT_PIN = 4;    // low while charging
+constexpr int PAPERS3_POWER_HOLD_PIN = 44; // pulsing low releases the latch
+
+bool isPaperS3() { return M5.getBoard() == m5::board_t::board_M5PaperS3; }
+
+int readBatteryMv() {
+  long sum = 0;
+  int samples = 0;
+  for (int i = 0; i < 8; i++) {
+    int mv = M5.Power.getBatteryVoltage();
+    if (mv > 0) {
+      sum += mv;
+      samples++;
+    }
+  }
+  return samples ? sum / samples : -1;
+}
+
+int mvToPercent(int mv) {
+  if (mv <= 0)
+    return -1;
+  int level = (mv - BATTERY_EMPTY_MV) * 100 / (BATTERY_FULL_MV - BATTERY_EMPTY_MV);
+  return level < 0 ? 0 : level > 100 ? 100 : level;
+}
+
+bool readCharging() {
+  return isPaperS3() && digitalRead(PAPERS3_CHG_STAT_PIN) == LOW;
+}
+
+bool isCritical(int mv, bool charging) {
+  return !charging && mv > 0 && mv < BATTERY_CRITICAL_MV;
+}
+
+} // namespace
+
+void AppManager::setup() {
+  if (isPaperS3())
+    pinMode(PAPERS3_CHG_STAT_PIN, INPUT);
+
+  batteryMv = readBatteryMv();
+  charging = readCharging();
+  batteryPercent = mvToPercent(batteryMv);
+  if (isCritical(batteryMv, charging)) {
+    powerDown("Battery empty", "Charge via USB-C, then press power.");
+  }
+
+  lastActivityTime = millis();
+  lastBatteryCheck = millis();
+  M5.Display.clear();
+}
 
 void AppManager::update() {
   M5.update();
 
-  // 1. Throttle WiFi status checks (every 1000ms)
-  // This allows the footer to update automatically when connection is
-  // established
-  static unsigned long lastWiFiCheck = 0;
-  if (millis() - lastWiFiCheck > 1000) {
-    lastWiFiCheck = millis();
-    wl_status_t currentRawStatus = WiFi.status();
-    if (currentRawStatus != lastRawWiFiStatus) {
-      lastRawWiFiStatus = currentRawStatus;
-      internalFooterUpdate = true;
-    }
+  checkStatus();
+  if (millis() - lastBatteryCheck >= BATTERY_CHECK_INTERVAL_MS) {
+    checkBattery();
   }
 
-  // 2. Update current application logic
   if (currentApp) {
     currentApp->update();
     if (currentApp->needsRedraw()) {
@@ -44,28 +86,28 @@ void AppManager::update() {
     }
   }
 
-  // 3. Handle Touch Input
+  // Touch: act on the press edge only
   if (M5.Touch.getCount() > 0) {
-    lastActivityTime = millis(); // Reset idle timer
+    lastActivityTime = millis();
     if (!touchActive) {
       touchActive = true;
       touchHandled = false;
       auto touch = M5.Touch.getDetail();
 
-      // Check navigation area first
+      M5.Speaker.tone(800, 30);
+
       handleNavigationTouch(touch.x, touch.y);
 
-      // Wants feedback mostly used by sudoku
+      // Apps that do their own partial redraws (Sudoku, Workout) opt out of
+      // the full-screen redraw on every touch.
       bool appWantsFeedback =
           !currentApp || currentApp->wantsTouchFeedback(touch.x, touch.y);
 
-      // If not handled by nav buttons, pass to the app
       if (!touchHandled && currentApp) {
         currentApp->handleTouch(touch.x, touch.y);
       }
-      // User interaction triggers a beep and full redraw unless the app opted
-      // out
-      if (touchHandled || appWantsFeedback) {
+      if (touchHandled || appWantsFeedback ||
+          (currentApp && currentApp->needsRedraw())) {
         needsRedraw = true;
       }
     }
@@ -73,53 +115,126 @@ void AppManager::update() {
     touchActive = false;
   }
 
-  // 4. Redraw Logic (Differentiates between User-Action and Background-Update)
-  if (needsRedraw || internalFooterUpdate) {
-    // Only beep if the user did something or the APP requested a refresh
-    if (needsRedraw) {
-      M5.Speaker.setVolume(128);
-      M5.Speaker.tone(800, 50);
-      if (currentApp) {
-        currentApp->draw();
-      }
+  // Batch the whole frame into one write so the EPD refreshes once, covering
+  // only the region that changed. (M5GFX auto-displays at the outermost
+  // endWrite; unbatched draw calls would each trigger a refresh.)
+  if (needsRedraw || footerDirty) {
+    M5.Display.startWrite();
+    if (needsRedraw && currentApp) {
+      currentApp->draw();
     }
-
-    // Footer always draws if there's a status change or full redraw
     drawFooter();
-
-    M5.Display.display();
+    M5.Display.endWrite();
 
     needsRedraw = false;
-    internalFooterUpdate = false;
+    footerDirty = false;
   }
 
-  // 5. Idle / Power Management
-  if (millis() - lastActivityTime > IDLE_TIMEOUT) {
-    if (M5.Display.isEPD()) {
-      M5.Display.setEpdMode(epd_mode_t::epd_quality);
+  unsigned long idleTimeout =
+      currentApp ? currentApp->idleTimeoutMs() : 300000UL;
+  if (millis() - lastActivityTime > idleTimeout) {
+    powerDown(nullptr, nullptr);
+  }
+
+  // Yield instead of spinning flat out; touch is still polled at ~100Hz.
+  delay(LOOP_DELAY_MS);
+}
+
+void AppManager::checkStatus() {
+  if (millis() - lastStatusCheck < STATUS_CHECK_INTERVAL_MS)
+    return;
+  lastStatusCheck = millis();
+
+  int wifiState = WiFi.getMode() == WIFI_OFF        ? 0
+                  : WiFi.status() == WL_CONNECTED ? 2
+                                                  : 1;
+  if (wifiState != lastWiFiState) {
+    lastWiFiState = wifiState;
+    footerDirty = true;
+  }
+
+  m5::rtc_time_t time;
+  M5.Rtc.getTime(&time);
+  if (time.minutes != lastFooterMinute) {
+    footerDirty = true;
+  }
+}
+
+void AppManager::checkBattery() {
+  lastBatteryCheck = millis();
+
+  int mv = readBatteryMv();
+  bool nowCharging = readCharging();
+  int percent = mvToPercent(mv);
+  bool low = !nowCharging && mv > 0 && mv < BATTERY_WARN_MV;
+
+  if (percent != batteryPercent || nowCharging != charging ||
+      low != batteryLow) {
+    footerDirty = true;
+  }
+  batteryMv = mv;
+  batteryPercent = percent;
+  charging = nowCharging;
+  batteryLow = low;
+
+  if (isCritical(mv, nowCharging)) {
+    criticalReadings++;
+    Serial.printf("Battery critical: %dmV (%d/%d)\n", mv, criticalReadings,
+                  CRITICAL_READINGS_BEFORE_SHUTDOWN);
+    if (criticalReadings >= CRITICAL_READINGS_BEFORE_SHUTDOWN) {
+      powerDown("Battery empty", "Charge via USB-C, then press power.");
     }
-    M5.Display.setRotation(2);
+  } else {
+    criticalReadings = 0;
+  }
+}
+
+// Saves app state, leaves a message (or the screensaver) on the e-ink panel,
+// which persists without power, then cuts power.
+void AppManager::powerDown(const char *title, const char *detail) {
+  Serial.println(title ? title : "Idle timeout, powering down");
+  if (currentApp) {
+    currentApp->exit();
+  }
+
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+
+  M5.Display.setRotation(2);
+  if (M5.Display.isEPD()) {
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+  }
+  M5.Display.startWrite();
+  if (title) {
+    M5.Display.fillScreen(WHITE);
+    M5.Display.setTextColor(BLACK);
+    M5.Display.setFont(&fonts::FreeSansBold24pt7b);
+    M5.Display.drawCentreString(title, 270, 380);
+    M5.Display.setFont(&fonts::FreeSans12pt7b);
+    M5.Display.drawCentreString(detail ? detail : "", 270, 460);
+    M5.Display.drawCentreString("Your data has been saved.", 270, 500);
+  } else {
     showScreensaver();
-    M5.Display.display();
-    delay(1000);
-    M5.Power.deepSleep();
+  }
+  M5.Display.endWrite();
+  M5.Display.waitDisplay();
+
+  SD.end();
+
+  if (isPaperS3()) {
+    // The PaperS3 power latch only releases on repeated pulses.
+    pinMode(PAPERS3_POWER_HOLD_PIN, OUTPUT);
+    for (int i = 0; i < 5; ++i) {
+      digitalWrite(PAPERS3_POWER_HOLD_PIN, LOW);
+      delay(50);
+      digitalWrite(PAPERS3_POWER_HOLD_PIN, HIGH);
+      delay(50);
+    }
   }
 
-  // 6. Battery Level Monitoring
-  if (millis() - lastBatteryCheck > BATTERY_CHECK_INTERVAL) {
-    lastBatteryCheck = millis();
-    int batteryLevel = M5.Power.getBatteryLevel();
-    float batteryVoltage = M5.Power.getBatteryVoltage() / 1000.0;
-
-    if (batteryLevel < LOW_BATTERY_THRESHOLD || batteryVoltage < 3.0) {
-      M5.Display.display();
-      delay(2000);
-      M5.Power.deepSleep();
-    }
-
-    if (batteryLevel != lastBatteryLevel) {
-      internalFooterUpdate = true;
-    }
+  // Still running: USB is holding the power rail up. Sleep instead.
+  M5.Power.deepSleep(0, false);
+  while (true) {
   }
 }
 
@@ -159,58 +274,51 @@ void AppManager::switchApp(const std::string &name, bool isNav) {
 }
 
 void AppManager::drawFooter() {
-  int currentBatteryLevel = M5.Power.getBatteryLevel();
-
-  // Convert WiFi status to readable string
-  std::string currentWiFiStatus = "Off";
-  wl_status_t status = WiFi.status();
-  if (status == WL_CONNECTED) {
-    currentWiFiStatus = "WiFi";
-  } else if (WiFi.getMode() != WIFI_OFF && status != WL_CONNECTED) {
-    currentWiFiStatus = "...";
-  }
-
   m5::rtc_time_t time;
   M5.Rtc.getTime(&time);
   m5::rtc_date_t date;
   M5.Rtc.getDate(&date);
+  lastFooterMinute = time.minutes;
 
-  // Tracking time change to trigger footer update
-  static int lastMin = -1;
-  bool timeChanged = (time.minutes != lastMin);
+  const char *wifi = lastWiFiState == 2   ? "WiFi"
+                     : lastWiFiState == 1 ? "..."
+                                          : "Off";
 
-  // Redraw if any status changed, or if a full screen redraw was requested
-  if (currentBatteryLevel != lastBatteryLevel ||
-      currentWiFiStatus != lastWiFiStatus || timeChanged ||
-      internalFooterUpdate || needsRedraw) {
-    lastMin = time.minutes;
-
-    M5.Display.fillRect(0, 910, 540, 50, WHITE);
-    M5.Display.setFont(&fonts::FreeSansBold12pt7b);
-    M5.Display.setTextColor(BLACK);
-
-    char dateBuffer[16];
-    sprintf(dateBuffer, "%04d/%02d/%02d", date.year, date.month, date.date);
-
-    char timeBuffer[16];
-    sprintf(timeBuffer, "%02d:%02d", time.hours, time.minutes);
-
-    std::string statusStr = "Bat: " + std::to_string(currentBatteryLevel) +
-                            "% | " + currentWiFiStatus + " | " + dateBuffer +
-                            " | " + timeBuffer;
-
-    M5.Display.drawString(statusStr.c_str(), 60, 935);
-    M5.Display.drawString("<", 20, 933);
-    M5.Display.drawString(">", 500, 933);
-
-    lastBatteryLevel = currentBatteryLevel;
-    lastWiFiStatus = currentWiFiStatus;
+  char battery[16];
+  if (batteryPercent < 0) {
+    snprintf(battery, sizeof(battery), "Bat --");
+  } else {
+    snprintf(battery, sizeof(battery), "%s %d%%",
+             charging ? "Chg" : batteryLow ? "LOW" : "Bat", batteryPercent);
   }
+
+  char rest[48];
+  snprintf(rest, sizeof(rest), " | %s | %04d/%02d/%02d | %02d:%02d", wifi,
+           date.year, date.month, date.date, time.hours, time.minutes);
+
+  M5.Display.fillRect(0, FOOTER_Y, 540, 50, WHITE);
+  M5.Display.setFont(&fonts::FreeSansBold12pt7b);
+  M5.Display.setTextColor(BLACK);
+  M5.Display.setTextDatum(top_left);
+
+  int x = 60;
+  int batteryW = M5.Display.textWidth(battery);
+  if (batteryLow) {
+    // Inverted so a low battery stands out
+    M5.Display.fillRect(x - 4, FOOTER_Y + 20, batteryW + 8, 26, BLACK);
+    M5.Display.setTextColor(WHITE);
+  }
+  M5.Display.drawString(battery, x, 935);
+  M5.Display.setTextColor(BLACK);
+  M5.Display.drawString(rest, x + batteryW, 935);
+
+  M5.Display.drawString("<", 20, 933);
+  M5.Display.drawString(">", 500, 933);
 }
 
 void AppManager::handleNavigationTouch(int x, int y) {
   // Only handle if in the bottom footer area
-  if (y < 910)
+  if (y < FOOTER_Y)
     return;
 
   // Back button area

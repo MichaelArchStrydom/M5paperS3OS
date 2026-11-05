@@ -48,15 +48,7 @@ SDExplorerApp::SDExplorerApp(AppManager* manager)
 }
 
 void SDExplorerApp::setup() {
-    M5.begin();
-    Serial.begin(115200);
-
-    if (!SD.begin()) {
-        Serial.println("SD card initialization failed!");
-    } else {
-        Serial.println("SD card initialized.");
-    }
-
+    // M5 and the SD card are initialised once in main.cpp
     folderHistory = {};
     folderHistoryForward = {};
     openDirectory("/");
@@ -138,6 +130,9 @@ void SDExplorerApp::drawImageViewer() {
     }
 
     M5.Display.endWrite();
+    // Push the image now: the EPD mode is applied when display() runs, and
+    // the frame batch in AppManager would otherwise flush it in fast mode.
+    M5.Display.display();
 
     //speed up
     if (M5.Display.isEPD()) {
